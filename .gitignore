@@ -6,6 +6,8 @@ claude-code-venv/.claude/
 # 备份目录
 1_Backup/
 1_Backup_venv/
+.claude/
+.claude
 
 # 虚拟环境
 claude-code-venv/venv_mac/
