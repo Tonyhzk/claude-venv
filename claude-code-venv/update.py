@@ -23,8 +23,11 @@ def get_platform_info() -> tuple:
     根据操作系统返回平台信息
     返回: (venv_name, bin_subdir, is_windows)
     """
-    if platform.system() == "Windows":
+    system = platform.system()
+    if system == "Windows":
         return "venv_win", "Scripts", True
+    elif system == "Linux":
+        return "venv_linux", "bin", False
     else:
         return "venv_mac", "bin", False
 
@@ -38,12 +41,67 @@ def get_available_venvs(script_dir: Path) -> List[Tuple[str, str, str]]:
     # 检查 macOS 虚拟环境
     if (script_dir / "venv_mac").exists():
         venvs.append(("venv_mac", "bin", "macOS"))
+
+    # 检查 Linux 虚拟环境
+    if (script_dir / "venv_linux").exists():
+        venvs.append(("venv_linux", "bin", "Linux"))
     
     # 检查 Windows 虚拟环境
     if (script_dir / "venv_win").exists():
         venvs.append(("venv_win", "Scripts", "Windows"))
     
     return venvs
+
+def get_claude_executable(venv_path: Path, bin_dir: Path, is_windows: bool) -> Path:
+    """
+    查找 Claude 可执行文件
+    """
+    if is_windows:
+        # Windows 下 npm global + prefix 的启动文件通常位于 prefix 根目录
+        search_dirs = [venv_path, bin_dir]
+        for search_dir in search_dirs:
+            for name in ["claude.cmd", "claude.ps1", "claude", "claude.exe"]:
+                candidate = search_dir / name
+                if candidate.exists():
+                    return candidate
+        return venv_path / "claude.cmd"
+
+    return bin_dir / "claude"
+
+def update_env_path(env: dict, venv_path: Path, venv_bin_dir: Path, is_windows: bool) -> None:
+    """
+    更新 PATH，确保 npm、node 和 claude 命令都可被找到
+    """
+    if is_windows:
+        path_entries = [str(venv_path), str(venv_bin_dir)]
+        path_separator = ";"
+    else:
+        path_entries = [str(venv_bin_dir)]
+        path_separator = ":"
+
+    current_path = env.get("PATH", "")
+    env["PATH"] = path_separator.join(path_entries + ([current_path] if current_path else []))
+
+def get_portable_npm_paths(script_dir: Path) -> tuple[Path, Path]:
+    """
+    返回项目内专用 npm 配置路径，避免读写用户全局配置
+    """
+    return script_dir / ".npmrc.portable", script_dir / ".npm-cache"
+
+def prepare_portable_npm_env(env: dict, script_dir: Path, venv_path: Path) -> None:
+    """
+    设置仅对当前进程生效的 npm 环境变量
+    """
+    npm_userconfig, npm_cache_dir = get_portable_npm_paths(script_dir)
+    npm_cache_dir.mkdir(parents=True, exist_ok=True)
+    npm_userconfig.touch(exist_ok=True)
+
+    env["NPM_CONFIG_PREFIX"] = str(venv_path)
+    env["NPM_CONFIG_USERCONFIG"] = str(npm_userconfig)
+    env["NPM_CONFIG_CACHE"] = str(npm_cache_dir)
+    env["NPM_CONFIG_UPDATE_NOTIFIER"] = "false"
+    env["NPM_CONFIG_FUND"] = "false"
+    env["NPM_CONFIG_AUDIT"] = "false"
 
 def run_command(cmd: list, env: dict, cwd: Path = None, timeout: int = None, show_output: bool = False) -> tuple:
     """
@@ -129,15 +187,10 @@ def upgrade_venv(script_dir: Path, venv_name: str, bin_subdir: str, display_name
     # 设置环境变量
     env = os.environ.copy()
     env["VIRTUAL_ENV"] = str(venv_path)
-    env["NPM_CONFIG_PREFIX"] = str(venv_path)
-    
+    prepare_portable_npm_env(env, script_dir, venv_path)
+
     # 更新 PATH
-    venv_bin = str(venv_bin_dir)
-    if "PATH" in env:
-        path_separator = ";" if is_windows else ":"
-        env["PATH"] = f"{venv_bin}{path_separator}{env['PATH']}"
-    else:
-        env["PATH"] = venv_bin
+    update_env_path(env, venv_path, venv_bin_dir, is_windows)
     
     # 检查 npm 是否可用
     print("🔍 检查 npm 是否可用...")
@@ -243,7 +296,8 @@ def upgrade_venv(script_dir: Path, venv_name: str, bin_subdir: str, display_name
     
     # 测试 claude 命令是否可用
     print("🔍 测试 claude 命令...")
-    returncode, stdout, stderr = run_command(["claude", "--version"], env, timeout=10)
+    claude_executable = get_claude_executable(venv_path, venv_bin_dir, is_windows)
+    returncode, stdout, stderr = run_command([str(claude_executable), "--version"], env, timeout=10)
     
     if returncode == 0:
         print(f"✅ claude 命令可用: {stdout.strip()}")
@@ -273,15 +327,10 @@ def check_all_versions(script_dir: Path, available_venvs: List[Tuple[str, str, s
         # 设置环境变量
         env = os.environ.copy()
         env["VIRTUAL_ENV"] = str(venv_path)
-        env["NPM_CONFIG_PREFIX"] = str(venv_path)
-        
+        prepare_portable_npm_env(env, script_dir, venv_path)
+
         # 更新 PATH
-        venv_bin = str(venv_bin_dir)
-        if "PATH" in env:
-            path_separator = ";" if is_windows else ":"
-            env["PATH"] = f"{venv_bin}{path_separator}{env['PATH']}"
-        else:
-            env["PATH"] = venv_bin
+        update_env_path(env, venv_path, venv_bin_dir, is_windows)
         
         # 获取当前版本
         current_version = get_npm_package_version(package_name, env)
@@ -476,7 +525,8 @@ def main():
     print("=" * 70)
     print()
     print("💡 提示：")
-    print("   - 使用 'python run.py' 启动 Claude Code")
+    print("   - Windows 使用 'run.bat' 启动 Claude Code")
+    print("   - macOS/Linux 使用 './run.sh' 启动 Claude Code")
     print("   - 使用 'python update.py' 再次升级")
     print()
 

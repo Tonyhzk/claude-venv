@@ -19,10 +19,48 @@ def get_platform_info() -> tuple:
     根据操作系统返回平台信息
     返回: (venv_name, bin_subdir, path_separator, is_windows)
     """
-    if platform.system() == "Windows":
+    system = platform.system()
+    if system == "Windows":
         return "venv_win", "Scripts", ";", True
+    elif system == "Linux":
+        return "venv_linux", "bin", ":", False
     else:
         return "venv_mac", "bin", ":", False
+
+def prepend_venv_to_path(env: dict, venv_path: Path, venv_bin_dir: Path, is_windows: bool) -> None:
+    """
+    将虚拟环境相关路径加入 PATH 最前面
+    """
+    if is_windows:
+        path_entries = [str(venv_path), str(venv_bin_dir)]
+        path_separator = ";"
+    else:
+        path_entries = [str(venv_bin_dir)]
+        path_separator = ":"
+
+    current_path = env.get("PATH", "")
+    env["PATH"] = path_separator.join(path_entries + ([current_path] if current_path else []))
+
+def get_portable_npm_paths(script_dir: Path) -> tuple[Path, Path]:
+    """
+    返回项目内专用的 npm 配置文件和缓存目录，避免读写用户全局配置
+    """
+    return script_dir / ".npmrc.portable", script_dir / ".npm-cache"
+
+def prepare_portable_npm_env(env: dict, script_dir: Path, venv_path: Path) -> None:
+    """
+    配置仅对当前进程生效的 npm 环境，避免修改用户电脑的全局 npm 配置
+    """
+    npm_userconfig, npm_cache_dir = get_portable_npm_paths(script_dir)
+    npm_cache_dir.mkdir(parents=True, exist_ok=True)
+    npm_userconfig.touch(exist_ok=True)
+
+    env["NPM_CONFIG_PREFIX"] = str(venv_path)
+    env["NPM_CONFIG_USERCONFIG"] = str(npm_userconfig)
+    env["NPM_CONFIG_CACHE"] = str(npm_cache_dir)
+    env["NPM_CONFIG_UPDATE_NOTIFIER"] = "false"
+    env["NPM_CONFIG_FUND"] = "false"
+    env["NPM_CONFIG_AUDIT"] = "false"
 
 def get_claude_executable(venv_path: Path, bin_dir: Path, is_windows: bool) -> Path:
     """
@@ -62,14 +100,10 @@ def main():
         print("❌ 错误：虚拟环境不存在")
         print(f"📍 期望路径: {venv_path}")
         print("\n💡 请先创建虚拟环境：")
-        print(f"   python -m venv {venv_name}")
         if is_windows:
-            print(f"   {venv_name}\\Scripts\\activate")
-            print(f"   npm config set prefix \"%CD%\\{venv_name}\"")
-            print("   npm install -g @anthropic-ai/claude-code")
+            print("   python build_venv.py --win")
         else:
-            print(f"   source {venv_name}/bin/activate_claude")
-            print("   npm install -g @anthropic-ai/claude-code")
+            print("   python3 build_venv.py")
         sys.exit(1)
     
     # 检查 Claude Code 是否已安装
@@ -78,8 +112,7 @@ def main():
         print(f"📍 期望路径: {claude_bin}")
         print("\n💡 请先安装 Claude Code：")
         if is_windows:
-            print(f"   {venv_name}\\Scripts\\activate")
-            print(f"   npm config set prefix \"%CD%\\{venv_name}\"")
+            print(f"   call {venv_name}\\Scripts\\activate_claude.bat")
             print("   npm install -g @anthropic-ai/claude-code")
         else:
             print(f"   source {venv_name}/bin/activate_claude")
@@ -91,9 +124,9 @@ def main():
     
     # 设置虚拟环境路径
     env["VIRTUAL_ENV"] = str(venv_path)
-    
-    # 设置 npm 全局安装路径
-    env["NPM_CONFIG_PREFIX"] = str(venv_path)
+
+    # 设置仅对当前进程生效的 npm 环境（不写用户全局配置）
+    prepare_portable_npm_env(env, script_dir, venv_path)
     
     # 🔑 从 .env 文件读取环境变量（优先级最高）
     env_file = script_dir / ".env"
@@ -139,12 +172,8 @@ def main():
         except Exception as e:
             print(f"Warning: Failed to load settings.json: {e}", file=sys.stderr)
     
-    # 更新 PATH，将虚拟环境的 bin 目录放在最前面
-    venv_bin = str(venv_bin_dir)
-    if "PATH" in env:
-        env["PATH"] = f"{venv_bin}{path_separator}{env['PATH']}"
-    else:
-        env["PATH"] = venv_bin
+    # 更新 PATH，将虚拟环境路径放在最前面
+    prepend_venv_to_path(env, venv_path, venv_bin_dir, is_windows)
     
     # 创建独立的配置目录
     Path(env["CLAUDE_CONFIG_DIR"]).mkdir(parents=True, exist_ok=True)

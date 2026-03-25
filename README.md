@@ -20,6 +20,8 @@
 ```
 claude-code-venv/
 ├── README.md              # 本文档
+├── run.bat                # Windows 启动入口（无需系统 Python）
+├── run.sh                 # macOS/Linux 启动入口（无需系统 Python）
 ├── run.py                 # 启动脚本（主要使用）
 ├── update.py              # 升级脚本
 ├── VERSION                # 版本号文件
@@ -69,6 +71,35 @@ ANTHROPIC_BASE_URL=https://api.anthropic.com
 ```
 
 ### 2️⃣ 启动 Claude Code
+
+#### 方式零：使用入口脚本启动（推荐，无需系统 Python）
+
+如果目标机器上没有安装 Python，优先使用项目自带入口脚本：
+
+**Windows：**
+
+```bat
+run.bat
+run.bat --version
+run.bat --help
+```
+
+**macOS/Linux：**
+
+```bash
+./run.sh
+./run.sh --version
+./run.sh --help
+```
+
+这些入口脚本会自动调用虚拟环境中的 Python 来执行 `run.py`，因此不依赖系统 Python。
+
+另外，启动和升级过程中使用的 npm 配置也都是**项目内临时环境变量**：
+- `NPM_CONFIG_PREFIX` 指向当前便携虚拟环境
+- `NPM_CONFIG_USERCONFIG` 指向项目内的 `.npmrc.portable`
+- `NPM_CONFIG_CACHE` 指向项目内的 `.npm-cache`
+
+因此**不会修改用户主目录下的 `.npmrc`、不会永久改系统 PATH，也不会把 npm 全局安装位置改到用户电脑的全局环境里**。
 
 #### 方式一：在虚拟环境目录内启动
 
@@ -159,6 +190,7 @@ vclaude
 - ✅ 安装 nodeenv 并嵌入 Node.js 环境
 - ✅ 通过 npm 安装 Claude Code
 - ✅ 自动修复绝对路径，提高可移植性
+- ✅ 自动创建 `run.bat` / `run.sh` 入口脚本
 - ✅ 支持选择性构建或批量构建
 - ✅ 支持自定义 Node.js 版本
 - ✅ 网络错误自动重试
@@ -213,6 +245,7 @@ python3 build_venv.py --help
 - ✅ 激活对应的虚拟环境
 - ✅ 加载 `.env` 文件中的环境变量
 - ✅ 设置独立的 Claude 配置目录
+- ✅ 使用项目内临时 npm 环境，不污染用户全局 npm 配置
 - ✅ 在当前终端目录启动 Claude Code
 
 **使用方法：**
@@ -228,6 +261,16 @@ python3 run.py --model sonnet
 
 # 从任意目录启动（使用全路径）
 python3 /path/to/claude-code-venv/run.py
+```
+
+如果目标环境没有系统 Python，请改用：
+
+```bash
+# Windows
+run.bat
+
+# macOS / Linux
+./run.sh
 ```
 
 **环境变量优先级：**

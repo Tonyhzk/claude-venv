@@ -76,6 +76,61 @@ class VenvBuilder:
             return 'win'
         else:
             return None
+
+    def get_claude_executable(self, platform_key):
+        """获取 Claude 可执行文件路径"""
+        config = self.venv_configs[platform_key]
+        venv_path = self.script_dir / config['name']
+
+        if platform_key == 'win':
+            # Windows 下 npm 使用 prefix 全局安装时，启动文件通常位于 prefix 根目录，
+            # 而不是 Python venv 的 Scripts 目录。
+            search_dirs = [venv_path, venv_path / 'Scripts']
+            for search_dir in search_dirs:
+                for name in ['claude.cmd', 'claude.ps1', 'claude', 'claude.exe']:
+                    candidate = search_dir / name
+                    if candidate.exists():
+                        return candidate
+            return venv_path / 'claude.cmd'
+
+        return venv_path / 'bin' / 'claude'
+
+    def build_runtime_env(self, platform_key):
+        """构建用于验证/运行的环境变量"""
+        config = self.venv_configs[platform_key]
+        venv_path = self.script_dir / config['name']
+        env = os.environ.copy()
+        env['VIRTUAL_ENV'] = str(venv_path)
+        self.prepare_portable_npm_env(env, venv_path)
+
+        if platform_key == 'win':
+            path_entries = [str(venv_path), str(venv_path / config['bin_dir'])]
+            path_separator = ';'
+        else:
+            path_entries = [str(venv_path / config['bin_dir'])]
+            path_separator = ':'
+
+        current_path = env.get('PATH', '')
+        env['PATH'] = path_separator.join(path_entries + ([current_path] if current_path else []))
+        return env
+
+    def get_portable_npm_paths(self):
+        """返回项目内专用 npm 配置路径，避免读写用户全局配置"""
+        return self.script_dir / '.npmrc.portable', self.script_dir / '.npm-cache'
+
+    def prepare_portable_npm_env(self, env, venv_path):
+        """配置仅对当前进程生效的 npm 环境变量"""
+        npm_userconfig, npm_cache_dir = self.get_portable_npm_paths()
+        npm_cache_dir.mkdir(parents=True, exist_ok=True)
+        npm_userconfig.touch(exist_ok=True)
+
+        env['NPM_CONFIG_PREFIX'] = str(venv_path)
+        env['NPM_CONFIG_USERCONFIG'] = str(npm_userconfig)
+        env['NPM_CONFIG_CACHE'] = str(npm_cache_dir)
+        env['NPM_CONFIG_UPDATE_NOTIFIER'] = 'false'
+        env['NPM_CONFIG_FUND'] = 'false'
+        env['NPM_CONFIG_AUDIT'] = 'false'
+        return env
     
     def print_header(self, text):
         """打印标题"""
@@ -307,6 +362,7 @@ class VenvBuilder:
         """通过 npm 安装 Claude Code"""
         config = self.venv_configs[platform_key]
         venv_path = self.script_dir / config['name']
+        env = self.build_runtime_env(platform_key)
         
         self.print_header(f"步骤 4/4: 安装 Claude Code")
         
@@ -324,18 +380,7 @@ class VenvBuilder:
             self.print_error(f"未找到 npm：{npm_path}")
             return False
         
-        # 设置 npm prefix 到虚拟环境
-        self.print_info("配置 npm 全局安装路径...")
-        try:
-            subprocess.run(
-                [str(npm_path), 'config', 'set', 'prefix', str(venv_path)],
-                check=True,
-                capture_output=True,
-                text=True
-            )
-            self.print_success("npm 配置成功")
-        except subprocess.CalledProcessError as e:
-            self.print_warning("npm 配置失败（可能不影响安装）")
+        self.print_info("使用项目内临时 npm 环境安装（不会修改用户全局 npm 配置）...")
         
         # 安装 Claude Code
         self.print_info("安装 @anthropic-ai/claude-code（这可能需要几分钟）...")
@@ -345,7 +390,8 @@ class VenvBuilder:
                 check=True,
                 capture_output=True,
                 text=True,
-                timeout=600  # 10分钟超时
+                timeout=600,  # 10分钟超时
+                env=env
             )
             self.print_success("Claude Code 安装成功")
             
@@ -364,14 +410,9 @@ class VenvBuilder:
         """验证安装"""
         config = self.venv_configs[platform_key]
         venv_path = self.script_dir / config['name']
-        
-        # 确定 claude 命令路径
-        if platform_key == 'win':
-            claude_path = venv_path / 'Scripts' / 'claude.cmd'
-            if not claude_path.exists():
-                claude_path = venv_path / 'Scripts' / 'claude.exe'
-        else:
-            claude_path = venv_path / 'bin' / 'claude'
+        env = self.build_runtime_env(platform_key)
+
+        claude_path = self.get_claude_executable(platform_key)
         
         if not claude_path.exists():
             self.print_error(f"未找到 claude 命令：{claude_path}")
@@ -384,7 +425,8 @@ class VenvBuilder:
                 check=True,
                 capture_output=True,
                 text=True,
-                timeout=30
+                timeout=30,
+                env=env
             )
             version = result.stdout.strip()
             self.print_success(f"Claude Code 版本：{version}")
@@ -499,7 +541,7 @@ class VenvBuilder:
         if platform_key == 'win':
             # Windows 批处理脚本
             script_path = venv_path / 'Scripts' / 'activate_claude.bat'
-            content = """@echo off
+            content = r"""@echo off
 REM Claude Code 虚拟环境激活脚本
 
 REM 获取脚本所在目录
@@ -511,6 +553,14 @@ call "%SCRIPT_DIR%activate.bat"
 
 REM 设置 npm 全局路径
 set NPM_CONFIG_PREFIX=%VENV_DIR%
+set NPM_CONFIG_USERCONFIG=%VENV_DIR%\..\.npmrc.portable
+set NPM_CONFIG_CACHE=%VENV_DIR%\..\.npm-cache
+set NPM_CONFIG_UPDATE_NOTIFIER=false
+set NPM_CONFIG_FUND=false
+set NPM_CONFIG_AUDIT=false
+
+REM npm 在 Windows + prefix 模式下通常把 claude.cmd 放在虚拟环境根目录
+set PATH=%VENV_DIR%;%PATH%
 
 echo.
 echo ============================================================
@@ -518,7 +568,7 @@ echo Claude Code 虚拟环境已激活
 echo ============================================================
 echo Python: %VIRTUAL_ENV%
 echo Node.js: %SCRIPT_DIR%node.exe
-echo Claude: %SCRIPT_DIR%claude.cmd
+echo Claude: %VENV_DIR%\claude.cmd
 echo ============================================================
 """
         else:
@@ -536,6 +586,11 @@ source "$SCRIPT_DIR/activate"
 
 # 设置 npm 全局路径
 export NPM_CONFIG_PREFIX="$VENV_DIR"
+export NPM_CONFIG_USERCONFIG="$VENV_DIR/../.npmrc.portable"
+export NPM_CONFIG_CACHE="$VENV_DIR/../.npm-cache"
+export NPM_CONFIG_UPDATE_NOTIFIER="false"
+export NPM_CONFIG_FUND="false"
+export NPM_CONFIG_AUDIT="false"
 
 # 确保 PATH 优先级
 export PATH="$SCRIPT_DIR:$PATH"
@@ -560,6 +615,74 @@ echo ""
         except Exception as e:
             self.print_warning(f"创建激活脚本失败：{e}")
             return False
+
+    def create_entry_scripts(self):
+        """创建根目录入口脚本（无需系统 Python）"""
+        scripts = {
+            'run.bat': r"""@echo off
+setlocal
+
+REM Claude Code 便携启动入口（无需系统 Python）
+set "SCRIPT_DIR=%~dp0"
+set "PYTHON_EXE=%SCRIPT_DIR%venv_win\Scripts\python.exe"
+
+if not exist "%PYTHON_EXE%" (
+    echo ❌ 未找到 Windows 虚拟环境：%PYTHON_EXE%
+    echo.
+    echo 请先在当前目录构建 Windows 虚拟环境：
+    echo    python build_venv.py --win
+    exit /b 1
+)
+
+"%PYTHON_EXE%" "%SCRIPT_DIR%run.py" %*
+exit /b %ERRORLEVEL%
+""",
+            'run.sh': """#!/bin/sh
+
+# Claude Code 便携启动入口（无需系统 Python）
+
+SCRIPT_DIR=\"$(CDPATH= cd -- \"$(dirname \"$0\")\" && pwd)\"
+SYSTEM_NAME=\"$(uname -s)\"
+
+case \"$SYSTEM_NAME\" in
+    Darwin*)
+        PYTHON_EXE=\"$SCRIPT_DIR/venv_mac/bin/python\"
+        ;;
+    Linux*)
+        PYTHON_EXE=\"$SCRIPT_DIR/venv_linux/bin/python\"
+        ;;
+    *)
+        echo \"❌ 不支持的系统：$SYSTEM_NAME\"
+        exit 1
+        ;;
+esac
+
+if [ ! -x \"$PYTHON_EXE\" ]; then
+    echo \"❌ 未找到对应虚拟环境：$PYTHON_EXE\"
+    echo
+    echo \"请先在当前目录构建当前系统的虚拟环境：\"
+    echo \"   python3 build_venv.py\"
+    exit 1
+fi
+
+exec \"$PYTHON_EXE\" \"$SCRIPT_DIR/run.py\" \"$@\"
+"""
+        }
+
+        created = []
+        for file_name, content in scripts.items():
+            script_path = self.script_dir / file_name
+            try:
+                script_path.write_text(content, encoding='utf-8')
+                if file_name.endswith('.sh'):
+                    script_path.chmod(0o755)
+                created.append(file_name)
+            except Exception as e:
+                self.print_warning(f"创建入口脚本 {file_name} 失败：{e}")
+
+        if created:
+            self.print_success(f"创建入口脚本：{', '.join(created)}")
+        return True
     
     def build(self, platform_key):
         """构建指定平台的虚拟环境"""
@@ -592,6 +715,7 @@ echo ""
         
         # 创建便捷激活脚本
         self.create_activate_claude_script(platform_key)
+        self.create_entry_scripts()
         
         self.print_success(f"{config['name']} 构建完成！")
         return True
@@ -707,7 +831,7 @@ def main():
         print("\n下一步：")
         print("1. 配置环境变量：cp .env.example .env")
         print("2. 编辑 .env 文件，填入你的 API 密钥")
-        print("3. 启动 Claude Code：python3 run.py")
+        print("3. 启动 Claude Code：Windows 用 run.bat，macOS/Linux 用 ./run.sh")
         print("\n或者使用便捷激活脚本：")
         for platform in platforms:
             config = builder.venv_configs[platform]
